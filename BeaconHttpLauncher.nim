@@ -20,15 +20,22 @@ else:
 
 proc main() {.async, rtl.} = 
 
-    if paramCount() != 2:
-        echo "Usage: BeaconHttpLauncher <url> <port>"
+    if paramCount() != 3:
+        echo "Usage: BeaconHttpLauncher <url> <port> <http/https>"
         return
 
     var url = paramStr(1)
     var port = paramStr(2)
+    var isHttp = paramStr(3)
+
+    var fullUrl = "http://"
+    if isHttp == "https":
+        fullUrl = "https://"
+
+    fullUrl.add(url)
 
     var beaconHttp = BeaconHttp()
-    beaconHttp.initBeaconHttp(url, port)
+    beaconHttp.initBeaconHttp(fullUrl, port)
     
     while true:
         try:

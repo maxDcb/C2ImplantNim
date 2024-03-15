@@ -110,13 +110,27 @@ proc ExtractInfo(path: string, info: FileInfo): FileExtract =
 
 proc execInstruction*(self: Beacon) =
     for it in self.tasks:
-        var instruction = it["instruction"].getStr()
-        var args = it["args"].getStr()
-        var cmd = it["cmd"].getStr()
-        var data = decode(it["data"].getStr())
-        var inputFile = decode(it["inputFile"].getStr())
-        var outputFile = decode(it["outputFile"].getStr())
-        var pid = it["pid"].getInt()
+        var instruction = ""
+        if it.contains("instruction"):
+            instruction = it["instruction"].getStr()
+        var args = ""
+        if it.contains("args"):
+            args = it["args"].getStr()
+        var cmd = ""
+        if it.contains("cmd"):
+            cmd = it["cmd"].getStr()
+        var data = ""
+        if it.contains("data"):
+            data = decode(it["data"].getStr())
+        var inputFile = ""
+        if it.contains("inputFile"):
+            inputFile = decode(it["inputFile"].getStr())
+        var outputFile = ""
+        if it.contains("outputFile"):
+            outputFile = decode(it["outputFile"].getStr())
+        var pid = -90
+        if it.contains("pid"):
+            pid = it["pid"].getInt()
 
         var result: string  
         case instruction:
