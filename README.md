@@ -6,5 +6,4 @@ This repository contains a small Nim implementation of an HTTP beacon compatible
 ## Compilation
 ```
 nim compile -d:ssl ./BeaconHttpLauncher.nim
-nim compile -d:ssl ./BeaconGithubLauncher.nim
 ```
