@@ -18,9 +18,9 @@ else:
   {.pragma: rtl, }
 
 
-proc main() {.async, rtl.} = 
+proc main() {.async, rtl.} =
 
-    if paramCount() != 3:
+    if paramCount() < 3 or paramCount() > 4:
         echo "Usage: BeaconHttpLauncher <url> <port> <http/https>"
         return
 
