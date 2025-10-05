@@ -704,10 +704,11 @@ when defined(linux):
           continue
         let localAddr = parseAddress(parts[1])
         let remoteAddr = parseAddress(parts[2])
-        let stateIdx = try:
-          parseHexInt(parts[3])
-        except CatchableError:
-          0
+        let stateIdx =
+          try:
+            parseHexInt(parts[3])
+          except CatchableError:
+            0
         let state = if stateIdx < tcpStates.len: tcpStates[stateIdx] else: tcpStates[0]
         output.add(fmt"{proto}\t{localAddr}\t{remoteAddr}\t{state}")
     except CatchableError:
