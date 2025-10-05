@@ -9,12 +9,12 @@ import std/algorithm
 import std/times
 import std/strformat
 import std/sequtils
-import std/widestrs
 import system
 import posix
 
 when defined(windows):
   import winlean
+  import std/widestrs
 
 
 proc toString*(str: seq[uint8]): string =
@@ -257,6 +257,12 @@ proc formatPermissions(perms: set[FilePermission], kind: PathComponent): string 
   result
 
 
+proc alignRight(value: string, width: int, fillChar: char = ' '): string =
+  if value.len >= width:
+    return value
+  repeat(fillChar, width - value.len) & value
+
+
 proc formatTimestamp(value: times.Time): string =
   value.format("MMM dd HH:mm")
 
@@ -271,7 +277,7 @@ proc formatDirectoryEntry(path: string, name: string, info: FileInfo): string =
 proc collectDirectoryEntries(target: string): tuple[entries: seq[string], error: string] =
   var result: seq[string] = @[]
   try:
-    let info = getFileInfo(target, followSymlinks = false)
+    let info = getFileInfo(target, followSymlink = false)
     result.add(formatDirectoryEntry(target, ".", info))
   except CatchableError:
     return (@[], changeDirFailureMessage)
@@ -279,17 +285,18 @@ proc collectDirectoryEntries(target: string): tuple[entries: seq[string], error:
   let parent = parentDir(target)
   if parent.len > 0 and dirExists(parent):
     try:
-      let parentInfo = getFileInfo(parent, followSymlinks = false)
+      let parentInfo = getFileInfo(parent, followSymlink = false)
       result.add(formatDirectoryEntry(parent, "..", parentInfo))
     except CatchableError:
       discard
 
   var entries: seq[(string, FileInfo)] = @[]
   try:
-    for name in listDir(target):
+    for entry in walkDir(target, relative = true):
+      let name = entry.path
       let fullPath = target / name
       try:
-        let info = getFileInfo(fullPath, followSymlinks = false)
+        let info = getFileInfo(fullPath, followSymlink = false)
         entries.add((name, info))
       except CatchableError:
         continue
@@ -312,7 +319,7 @@ proc handleListDirectory(path: string): string =
     target = getCurrentDir()
   if fileExists(target) and not dirExists(target):
     try:
-      let info = getFileInfo(target, followSymlinks = false)
+      let info = getFileInfo(target, followSymlink = false)
       return formatDirectoryEntry(target, lastPathPart(target), info)
     except CatchableError:
       return fileDoesNotExistMessage
@@ -421,7 +428,8 @@ proc handleListProcesses(): string =
     if not dirExists(procDir):
       return operationNotSupportedMessage
     var entries: seq[tuple[pid: int, line: string]] = @[]
-    for name in listDir(procDir):
+    for entry in walkDir(procDir, relative = true, skipSpecial = true):
+      let name = entry.path
       if not isNumeric(name):
         continue
       let pid = parseInt(name)
@@ -431,7 +439,7 @@ proc handleListProcesses(): string =
       let command = if cmdline.len > 0: cmdline else: statData.name
       let ppid = if statData.ppid.len > 0: statData.ppid else: "0"
       entries.add((pid, fmt"{pid}\t{ppid}\t{command}"))
-    entries.sort(proc(a, b: (int, string)): int = cmp(a.pid, b.pid))
+    entries.sort(proc(a, b: tuple[pid: int, line: string]): int = cmp(a.pid, b.pid))
     var lines: seq[string] = @["PID\tPPID\tCommand"]
     for entry in entries:
       lines.add(entry.line)
@@ -708,22 +716,33 @@ when defined(linux):
 
 when defined(posix):
   type
-    PIfAddrs = ptr Ifaddrs
+    Ifaddrs {.importc: "struct ifaddrs", header: "<ifaddrs.h>", final.} = object
+      ifa_next*: ptr Ifaddrs
+      ifa_name*: cstring
+      ifa_flags*: cuint
+      ifa_addr*: ptr Sockaddr
+      ifa_netmask*: ptr Sockaddr
+      ifa_data*: pointer
 
-  proc toIpString(addr: ptr Sockaddr): string =
-    if addr == nil:
+  proc getifaddrs(outAddrs: ptr ptr Ifaddrs): cint {.importc: "getifaddrs", header: "<ifaddrs.h>".}
+  proc freeifaddrs(addrs: ptr Ifaddrs) {.importc: "freeifaddrs", header: "<ifaddrs.h>".}
+
+  proc toIpString(sa: ptr Sockaddr): string =
+    if sa == nil:
       return emptyString
-    case addr.sa_family
+    case cint(sa.sa_family)
     of AF_INET:
       var buffer: array[INET_ADDRSTRLEN, char]
-      let sin = cast[ptr Sockaddr_in](addr)
-      if inet_ntop(AF_INET, addr sin.sin_addr, addr buffer[0], buffer.len.cuint) != nil:
-        result = $cast[cstring](addr buffer[0])
+      let sin = cast[ptr Sockaddr_in](sa)
+      let dest = cast[cstring](addr buffer[0])
+      if inet_ntop(AF_INET, addr sin.sin_addr, dest, buffer.len.int32) != nil:
+        result = $dest
     of AF_INET6:
       var buffer: array[INET6_ADDRSTRLEN, char]
-      let sin6 = cast[ptr Sockaddr_in6](addr)
-      if inet_ntop(AF_INET6, addr sin6.sin6_addr, addr buffer[0], buffer.len.cuint) != nil:
-        result = $cast[cstring](addr buffer[0])
+      let sin6 = cast[ptr Sockaddr_in6](sa)
+      let dest = cast[cstring](addr buffer[0])
+      if inet_ntop(AF_INET6, addr sin6.sin6_addr, dest, buffer.len.int32) != nil:
+        result = $dest
     else:
       result = emptyString
 
@@ -744,7 +763,7 @@ proc handleNetstat(): string =
 
 proc handleIpConfig(): string =
   when defined(posix):
-    var ifaddr: PIfAddrs
+    var ifaddr: ptr Ifaddrs
     if getifaddrs(addr ifaddr) != 0:
       return commandExecutionFailureMessage
     var lines: seq[string] = @[]
