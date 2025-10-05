@@ -414,7 +414,7 @@ proc handleKillProcess(pidValue: string): string =
     else:
       output
   else:
-    if kill(parsedPid, SIGTERM) == 0 or kill(parsedPid, SIGKILL) == 0:
+    if (kill(Pid(parsedPid), SIGTERM) == 0) or (kill(Pid(parsedPid), SIGKILL) == 0):
       okMessage
     else:
       killProcessFailureMessage
@@ -447,11 +447,13 @@ proc handleTree(path: string): string =
   if target.len == 0:
     target = getCurrentDir()
   if dirExists(target):
-    var result = normalizePath(target) & "\n"
+    normalizePath(target)
+    var result = target & "\n"
     appendTree(target, emptyString, result)
     return result
   if fileExists(target):
-    return normalizePath(target)
+    normalizePath(target)
+    return target
   fileDoesNotExistMessage
 
 
