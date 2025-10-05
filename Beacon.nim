@@ -71,7 +71,7 @@ const
   missingSleepValueMessage* = "Missing sleep value"
   invalidSleepValueMessage* = "Invalid sleep value"
   unknownInstructionMessage* = "Unknown instruction"
-  moduleCommandNotRequiredMessage* = "Module commands are not required for this beacon"
+  loadModuleNotRequiredMessage* = "Load Module is not required for this beacon"
   missingPathMessage* = "Missing path argument"
   missingFilePathMessage* = "Missing file path"
   missingCommandMessage* = "Missing command"
@@ -87,7 +87,7 @@ const
   doubleQuoteString* = "\""
   escapedDoubleQuoteString* = "\"\""
 
-  instructionModuleCmd* = "modulecmd"
+  instructionLoadModule* = "loadmodule"
   instructionLs* = "ls"
   instructionListDirectory* = "listdirectory"
   instructionPs* = "ps"
@@ -260,8 +260,8 @@ proc normalizePath(path: string): string =
     result = path
 
 
-proc handleModuleCommand(): string =
-  moduleCommandNotRequiredMessage
+proc handleLoadModule(): string =
+  loadModuleNotRequiredMessage
 
 
 proc handleChangeDirectory(path: string): string =
@@ -609,8 +609,8 @@ proc execInstruction*(self: Beacon) =
 
     var result = emptyString
     case normalizedInstruction:
-    of instructionModuleCmd:
-      result = handleModuleCommand()
+    of instructionLoadModule:
+      result = handleLoadModule()
     of instructionLs, instructionListDirectory:
       result = handleListDirectory(if cmd.len > 0: cmd else: args)
     of instructionPs, instructionListProcesses:
