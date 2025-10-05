@@ -4,11 +4,9 @@ import os
 import osproc
 import std/base64
 import std/random
-import std/tables
 import std/options
 import system
 import posix
-# import psutil
 
 
 proc toString*(str: seq[uint8]): string =
